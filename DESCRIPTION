@@ -1,0 +1,29 @@
+Package: novaTagger
+Type: Package
+Title: Reviewable Survey Question Tagging
+Version: 0.0.0.9000
+Authors@R: person("Nova Institute", role = c("aut", "cre"), email = "maintainers@example.com")
+Description: Embeds, clusters, tags, diagnoses, and supports human review of
+    normalized survey questions. Fluree communication is delegated to novaRush.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends: R (>= 4.2)
+Imports:
+    dplyr,
+    httr2,
+    jsonlite,
+    purrr,
+    rlang,
+    stats,
+    stringr,
+    tibble,
+    tidyr,
+    utils
+Suggests:
+    devtools,
+    reticulate,
+    testthat,
+    withr
+Config/testthat/edition: 3
