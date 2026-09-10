@@ -119,7 +119,7 @@ tag_state_to_semantic_records <- function(
     "hierarchy", state$run_id, hierarchy_version, base_iri = base_iri
   )
   cluster_iri <- function(level, cluster_id) tagging_entity_iri(
-    "hierarchy", state$run_id, state$revision, "cluster", level, cluster_id,
+    "hierarchy", state$run_id, hierarchy_version, "cluster", level, cluster_id,
     base_iri = base_iri
   )
 
@@ -205,7 +205,8 @@ tag_state_to_semantic_records <- function(
         leaf_id <- state$assignments$cluster_level_1[[i]]
         list(
           "@id" = tagging_entity_iri(
-            "hierarchy", state$run_id, state$revision, "membership", question_id,
+            "hierarchy", state$run_id, hierarchy_version,
+            "membership", question_id,
             base_iri = base_iri
           ),
           "@type" = .tag_term("LeafClusterMembership"),

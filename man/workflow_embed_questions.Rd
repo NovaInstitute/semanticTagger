@@ -8,6 +8,7 @@ workflow_embed_questions(
   workflow,
   provider,
   batch_size = 100L,
+  checkpoint_size = batch_size,
   event_callback = NULL,
   progress_callback = NULL
 )
@@ -18,6 +19,11 @@ workflow_embed_questions(
 \item{provider}{A \code{\link[=new_model_provider]{new_model_provider()}} implementation.}
 
 \item{batch_size}{Maximum questions per provider request.}
+
+\item{checkpoint_size}{Approximate number of newly embedded questions between
+persistence checkpoints. Defaults to \code{batch_size}, preserving the behavior
+of checkpointing every provider request. A larger value reduces persistence
+traffic at the cost of repeating at most that many embeddings after a crash.}
 
 \item{event_callback}{Optional structured event callback.}
 

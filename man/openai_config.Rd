@@ -8,6 +8,7 @@ openai_config(
   api_key = Sys.getenv("OPENAI_API_KEY", unset = ""),
   base_url = Sys.getenv("OPENAI_BASE_URL", unset = "https://api.openai.com/v1"),
   embed_model = Sys.getenv("OPENAI_EMBED_MODEL", unset = "text-embedding-3-small"),
+  dimensions = NULL,
   generation_model = Sys.getenv("OPENAI_TAGGER_MODEL", unset = "gpt-5.4-mini")
 )
 }
@@ -17,6 +18,9 @@ openai_config(
 \item{base_url}{OpenAI API base URL.}
 
 \item{embed_model}{Embedding model identifier.}
+
+\item{dimensions}{Optional output dimensions for embedding models that
+support shortened embeddings. Use \code{NULL} to request the model default.}
 
 \item{generation_model}{Responses API model identifier.}
 }

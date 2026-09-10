@@ -80,11 +80,16 @@ resume_tagging_workflow <- function(store) {
 #' @param workflow A `tagging_workflow`.
 #' @param provider A [new_model_provider()] implementation.
 #' @param batch_size Maximum questions per provider request.
+#' @param checkpoint_size Approximate number of newly embedded questions between
+#'   persistence checkpoints. Defaults to `batch_size`, preserving the behavior
+#'   of checkpointing every provider request. A larger value reduces persistence
+#'   traffic at the cost of repeating at most that many embeddings after a crash.
 #' @param event_callback Optional structured event callback.
 #' @param progress_callback Optional function accepting `(completed, total)`.
 #' @return Updated workflow.
 #' @export
 workflow_embed_questions <- function(workflow, provider, batch_size = 100L,
+                                     checkpoint_size = batch_size,
                                      event_callback = NULL,
                                      progress_callback = NULL) {
   workflow <- .validate_tagging_workflow(workflow)
@@ -101,8 +106,15 @@ workflow_embed_questions <- function(workflow, provider, batch_size = 100L,
   pending <- which(vapply(embeddings, is.null, logical(1)))
   if (!length(pending) && identical(state$workflow$stage, "embedded")) return(workflow)
   batch_size <- max(1L, as.integer(batch_size))
+  checkpoint_size <- suppressWarnings(as.integer(checkpoint_size))
+  if (length(checkpoint_size) != 1L || is.na(checkpoint_size) ||
+      checkpoint_size < 1L) {
+    stop("`checkpoint_size` must be one positive integer.", call. = FALSE)
+  }
   batches <- split(pending, ceiling(seq_along(pending) / batch_size))
-  for (indices in batches) {
+  since_checkpoint <- 0L
+  for (batch_number in seq_along(batches)) {
+    indices <- batches[[batch_number]]
     if (!length(indices)) next
     embeddings[indices] <- model_embed_batch(
       provider, state$questions$caption[indices], event_callback
@@ -112,13 +124,19 @@ workflow_embed_questions <- function(workflow, provider, batch_size = 100L,
     state$workflow$model_provider <- provider$name
     state$workflow$embedding_model <- provider$embedding_model
     state$workflow$generation_model <- provider$generation_model
-    workflow$state <- state
-    workflow <- .workflow_checkpoint(workflow)
-    state <- workflow$state
-    completed <- sum(!vapply(embeddings, is.null, logical(1)))
-    if (is.function(progress_callback)) progress_callback(completed, total)
-    .workflow_emit(event_callback, "embedding_checkpoint", state,
-                   list(completed = completed, total = total))
+    since_checkpoint <- since_checkpoint + length(indices)
+    should_checkpoint <- since_checkpoint >= checkpoint_size ||
+      batch_number == length(batches)
+    if (should_checkpoint) {
+      workflow$state <- state
+      workflow <- .workflow_checkpoint(workflow)
+      state <- workflow$state
+      completed <- sum(!vapply(embeddings, is.null, logical(1)))
+      if (is.function(progress_callback)) progress_callback(completed, total)
+      .workflow_emit(event_callback, "embedding_checkpoint", state,
+                     list(completed = completed, total = total))
+      since_checkpoint <- 0L
+    }
   }
   state$embeddings <- do.call(rbind, .validate_embedding_vectors(embeddings, total))
   state$workflow$stage <- "embedded"
