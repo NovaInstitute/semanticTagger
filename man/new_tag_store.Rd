@@ -4,7 +4,15 @@
 \alias{new_tag_store}
 \title{Create a tagging-state store}
 \usage{
-new_tag_store(exists, load, save, label = "custom", metadata = list())
+new_tag_store(
+  exists,
+  load,
+  save,
+  label = "custom",
+  metadata = list(),
+  save_proposal = NULL,
+  save_review = NULL
+)
 }
 \arguments{
 \item{exists}{Function with no arguments that returns whether state exists.}

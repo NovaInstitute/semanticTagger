@@ -202,10 +202,16 @@
   existing_ids <- vapply(
     existing, function(node) as.character(node[["@id"]]), character(1)
   )
-  unname(Filter(function(node) {
-    hit <- match(as.character(node[["@id"]]), existing_ids)
-    is.na(hit) || !identical(existing[[hit]], node)
-  }, incoming))
+  incoming_ids <- vapply(
+    incoming, function(node) as.character(node[["@id"]]), character(1)
+  )
+  hits <- match(incoming_ids, existing_ids)
+  changed <- is.na(hits)
+  matched <- which(!changed)
+  changed[matched] <- !vapply(matched, function(i) {
+    identical(existing[[hits[[i]]]], incoming[[i]])
+  }, logical(1))
+  unname(incoming[changed])
 }
 
 #' Create a novaRush-backed semantic tagging repository
@@ -268,24 +274,49 @@ novarush_semantic_repository <- function(
     cache$records
   }
 
+  check_revision <- function(scope_iri, revision) {
+    stored <- .nr_query_run_revision(
+      scope_iri, graphs$run, config = config, branch = branch
+    )
+    if (!is.null(stored)) {
+      expected <- as.integer(revision) - 1L
+      if (!identical(stored, expected)) {
+        stop(
+          "Cannot save stale tagging state: stored revision is ", stored,
+          " but the preceding revision is ", expected, ".", call. = FALSE
+        )
+      }
+    }
+  }
+
+  write_records <- function(records, scope_iri) {
+    for (batch in .nr_batches(records$embedding, batch_size)) {
+      prepared <- lapply(batch, .nr_envelope, scope_iri = scope_iri,
+                         embedding = TRUE)
+      .nr_upsert_vectors(prepared, graphs$embedding, .nr_vector_property,
+                         config = config, branch = branch)
+      .nr_pause(transaction_delay_seconds)
+    }
+    for (partition in c("hierarchy", "review")) {
+      for (batch in .nr_batches(records[[partition]], batch_size)) {
+        prepared <- lapply(batch, .nr_envelope, scope_iri = scope_iri)
+        .nr_upsert_named_graph(prepared, graphs[[partition]],
+                               config = config, branch = branch)
+        .nr_pause(transaction_delay_seconds)
+      }
+    }
+    prepared_run <- lapply(records$run, .nr_envelope, scope_iri = scope_iri)
+    .nr_upsert_named_graph(prepared_run, graphs$run,
+                           config = config, branch = branch)
+  }
+
   list(
     exists = function(scope_iri) {
       length(load_remote(scope_iri)$run) > 0L
     },
     load = function(scope_iri) load_remote(scope_iri),
     save = function(records, scope_iri, revision) {
-      stored <- .nr_query_run_revision(
-        scope_iri, graphs$run, config = config, branch = branch
-      )
-      if (!is.null(stored)) {
-        expected <- as.integer(revision) - 1L
-        if (!identical(stored, expected)) {
-          stop(
-            "Cannot save stale tagging state: stored revision is ", stored,
-            " but the preceding revision is ", expected, ".", call. = FALSE
-          )
-        }
-      }
+      check_revision(scope_iri, revision)
 
       current <- if (identical(cache$scope, scope_iri) &&
                      !is.null(cache$records)) cache$records else
@@ -294,37 +325,33 @@ novarush_semantic_repository <- function(
         current$embedding %||% list(), records$embedding
       )
 
-      for (batch in .nr_batches(new_embeddings, batch_size)) {
-        prepared <- lapply(batch, .nr_envelope, scope_iri = scope_iri,
-                           embedding = TRUE)
-        .nr_upsert_vectors(
-          prepared, graphs$embedding, .nr_vector_property,
-          config = config, branch = branch
-        )
-        .nr_pause(transaction_delay_seconds)
-      }
+      changed_records <- list(embedding = new_embeddings)
       for (partition in c("hierarchy", "review")) {
-        changed <- .nr_changed_nodes(
+        changed_records[[partition]] <- .nr_changed_nodes(
           current[[partition]] %||% list(), records[[partition]]
         )
-        for (batch in .nr_batches(changed, batch_size)) {
-          prepared <- lapply(batch, .nr_envelope, scope_iri = scope_iri)
-          .nr_upsert_named_graph(
-            prepared, graphs[[partition]], config = config, branch = branch
-          )
-          .nr_pause(transaction_delay_seconds)
-        }
       }
-      prepared_run <- lapply(records$run, .nr_envelope, scope_iri = scope_iri)
-      .nr_upsert_named_graph(
-        prepared_run, graphs$run, config = config, branch = branch
-      )
+      changed_records$run <- records$run
+      write_records(changed_records, scope_iri)
 
       cache$scope <- scope_iri
       cache$records <- lapply(names(records), function(partition) {
         .nr_merge_nodes(current[[partition]] %||% list(), records[[partition]])
       })
       names(cache$records) <- names(records)
+      invisible(TRUE)
+    },
+    save_delta = function(records, scope_iri, revision) {
+      check_revision(scope_iri, revision)
+      write_records(records, scope_iri)
+      current <- if (identical(cache$scope, scope_iri) &&
+                     !is.null(cache$records)) cache$records else
+        list(run = list(), embedding = list(), hierarchy = list(), review = list())
+      cache$scope <- scope_iri
+      cache$records <- lapply(names(current), function(partition) {
+        .nr_merge_nodes(current[[partition]], records[[partition]] %||% list())
+      })
+      names(cache$records) <- names(current)
       invisible(TRUE)
     },
     metadata = list(

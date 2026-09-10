@@ -12,7 +12,8 @@
 #'
 #' @return A `tag_store` object.
 #' @export
-new_tag_store <- function(exists, load, save, label = "custom", metadata = list()) {
+new_tag_store <- function(exists, load, save, label = "custom", metadata = list(),
+                          save_proposal = NULL, save_review = NULL) {
   functions <- list(exists = exists, load = load, save = save)
   if (!all(vapply(functions, is.function, logical(1)))) {
     stop("`exists`, `load`, and `save` must be functions.", call. = FALSE)
@@ -20,10 +21,35 @@ new_tag_store <- function(exists, load, save, label = "custom", metadata = list(
   if (!is.list(metadata)) {
     stop("`metadata` must be a list.", call. = FALSE)
   }
+  optional <- list(save_proposal = save_proposal, save_review = save_review)
+  if (!all(vapply(optional, function(x) is.null(x) || is.function(x), logical(1)))) {
+    stop("Focused save callbacks must be NULL or functions.", call. = FALSE)
+  }
   structure(
-    c(functions, list(label = as.character(label)[[1]], metadata = metadata)),
+    c(functions, optional,
+      list(label = as.character(label)[[1]], metadata = metadata)),
     class = "tag_store"
   )
+}
+
+.tag_store_save_focused <- function(store, state, callback, ...) {
+  validate_tag_store(store)
+  state <- validate_tag_state(state)
+  current <- if (tag_store_exists(store)) tag_store_load(store) else NULL
+  if (!is.null(current) && !identical(current$run_id, state$run_id)) {
+    stop("Tag store contains a different run ID.", call. = FALSE)
+  }
+  if (!is.null(current) &&
+      !identical(as.integer(current$revision), as.integer(state$revision))) {
+    stop("Cannot save stale tagging state: stored revision is ",
+         current$revision, " but supplied revision is ", state$revision, ".",
+         call. = FALSE)
+  }
+  state$revision <- state$revision + 1L
+  state$updated_at <- Sys.time()
+  focused <- store[[callback]]
+  if (is.function(focused)) focused(state, ...) else store$save(state)
+  invisible(state)
 }
 
 #' Create an in-memory tagging-state store

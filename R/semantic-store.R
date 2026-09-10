@@ -62,23 +62,57 @@ semantic_tag_store <- function(
   .validate_semantic_repository_callbacks(repository)
   questions <- tibble::as_tibble(questions)
   scope_iri <- tagging_entity_iri("run", run_id, base_iri = base_iri)
-  new_tag_store(
+  project <- function(state) tag_state_to_semantic_records(
+    state, base_iri = base_iri, question_base_iri = question_base_iri
+  )
+  save_proposal_callback <- if (!is.function(repository$save_delta)) NULL else
+    function(state, proposal_id) {
+      records <- project(state)
+      records$embedding <- list()
+      records$hierarchy <- list()
+      records$review <- Filter(function(node) {
+        identical(.tag_node_type(node), .tag_term("TagProposal")) &&
+          identical(as.character(node[["https://schema.org/identifier"]]),
+                    as.character(proposal_id))
+      }, records$review)
+      repository$save_delta(records, scope_iri, state$revision)
+    }
+  save_review_callback <- if (!is.function(repository$save_delta)) NULL else
+    function(state, proposal_id, event_id, level, cluster_id,
+             cluster_changed) {
+      records <- project(state)
+      records$embedding <- list()
+      records$review <- Filter(function(node) {
+        id <- as.character(node[["https://schema.org/identifier"]] %||% "")
+        id %in% c(as.character(proposal_id), as.character(event_id))
+      }, records$review)
+      records$hierarchy <- if (!isTRUE(cluster_changed)) list() else
+        Filter(function(node) {
+          identical(.tag_node_type(node), .tag_term("QuestionCluster")) &&
+            identical(as.integer(node[[.tag_term("level")]]), as.integer(level)) &&
+            identical(as.character(node[["https://schema.org/identifier"]]),
+                      as.character(cluster_id))
+        }, records$hierarchy)
+      repository$save_delta(records, scope_iri, state$revision)
+    }
+  store <- new_tag_store(
     exists = function() isTRUE(repository$exists(scope_iri)),
     load = function() {
       records <- .current_semantic_records(repository$load(scope_iri))
       tag_state_from_semantic_records(records, questions)
     },
     save = function(state) {
-      records <- tag_state_to_semantic_records(
-        state, base_iri = base_iri, question_base_iri = question_base_iri
-      )
+      records <- project(state)
       repository$save(records, scope_iri, state$revision)
       invisible(state)
     },
     label = "semantic records",
+    save_proposal = save_proposal_callback,
+    save_review = save_review_callback,
     metadata = c(
       list(scope_iri = scope_iri, run_id = as.character(run_id)),
       repository$metadata %||% list()
     )
   )
+  store
 }
