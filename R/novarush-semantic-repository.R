@@ -277,13 +277,17 @@ novarush_semantic_repository <- function(
   cached_revision <- function(scope_iri) {
     if (!identical(cache$scope, scope_iri) || is.null(cache$records) ||
         !length(cache$records$run)) return(NULL)
-    version <- cache$records$run[[1L]][["https://schema.org/version"]]
-    if (is.list(version) && "@value" %in% names(version)) {
-      version <- version[["@value"]]
-    }
-    version <- suppressWarnings(as.integer(version))
-    if (length(version) != 1L || is.na(version)) return(NULL)
-    version
+    versions <- vapply(cache$records$run, function(node) {
+      version <- node[["https://schema.org/version"]]
+      if (is.list(version) && "@value" %in% names(version)) {
+        version <- version[["@value"]]
+      }
+      value <- suppressWarnings(as.integer(version))
+      if (length(value) == 1L) value else NA_integer_
+    }, integer(1))
+    versions <- versions[!is.na(versions)]
+    if (!length(versions)) return(NULL)
+    max(versions)
   }
 
   check_revision <- function(scope_iri, revision) {

@@ -203,6 +203,38 @@ test_that("repository uses its successful-write cache while Fluree indexing lags
   expect_equal(stored_revision, state$revision)
 })
 
+test_that("repository cache selects the newest duplicated run pointer", {
+  state <- semantic_state_fixture()
+  records <- tag_state_to_semantic_records(
+    state, question_base_iri = "https://example.org/question/"
+  )
+  historical_run <- records$run[[1L]]
+  historical_run[["https://schema.org/version"]] <- state$revision - 1L
+  loaded <- records
+  loaded$run <- c(list(historical_run), records$run)
+  writes <- 0L
+  testthat::local_mocked_bindings(
+    .nr_load_records = function(...) loaded,
+    .nr_query_run_revision = function(...) state$revision - 1L,
+    .nr_upsert_vectors = function(...) list(status = "ok"),
+    .nr_upsert_named_graph = function(...) {
+      writes <<- writes + 1L
+      list(status = "ok")
+    },
+    .package = "novaTagger"
+  )
+  repository <- novarush_semantic_repository(
+    list(branch = "main"), tagging_graph_fixture()
+  )
+  scope <- records$run[[1L]][["@id"]]
+  expect_true(repository$exists(scope))
+  next_records <- records
+  next_records$run[[1L]][["https://schema.org/version"]] <-
+    state$revision + 1L
+  expect_silent(repository$save(next_records, scope, state$revision + 1L))
+  expect_gt(writes, 0L)
+})
+
 test_that("hydrated embeddings are not written again after interruption", {
   state <- semantic_state_fixture()
   records <- tag_state_to_semantic_records(
