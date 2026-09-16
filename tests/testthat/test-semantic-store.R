@@ -48,3 +48,19 @@ test_that("semantic tag store filters immutable history to current hierarchy", {
     "HierarchyVersion"
   )), 1L)
 })
+
+test_that("semantic tag store selects the newest duplicate run pointer", {
+  state <- semantic_state_fixture()
+  records <- tag_state_to_semantic_records(
+    state, question_base_iri = "https://example.org/question/"
+  )
+  historical_run <- records$run[[1L]]
+  historical_run[["https://schema.org/version"]] <- state$revision - 1L
+  records$run <- c(list(historical_run), records$run)
+
+  current <- novaTagger:::.current_semantic_records(records)
+  expect_length(current$run, 1L)
+  expect_equal(
+    current$run[[1L]][["https://schema.org/version"]], state$revision
+  )
+})
