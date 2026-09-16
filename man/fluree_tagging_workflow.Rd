@@ -14,6 +14,8 @@ fluree_tagging_workflow(
   source_form_id = NULL,
   page_size = 500L,
   batch_size = 250L,
+  query_page_size = 100L,
+  transaction_delay_seconds = 0,
   base_iri = "https://data.nova.org/tagger/",
   event_callback = NULL
 )
@@ -38,6 +40,11 @@ Defaults to \code{config$branch}.}
 \item{page_size}{Maximum rows retrieved in each survey query.}
 
 \item{batch_size}{Maximum semantic resources in each tagging write.}
+
+\item{query_page_size}{Maximum records per tagging-state hydration query.}
+
+\item{transaction_delay_seconds}{Seconds to pause after each supporting
+Fluree transaction during large writes.}
 
 \item{base_iri}{Base IRI for tagging-domain entities.}
 
