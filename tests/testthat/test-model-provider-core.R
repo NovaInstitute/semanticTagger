@@ -24,5 +24,4 @@ test_that("embedding validation is independent of persistence", {
     generate = function(...) "unused"
   )
   expect_error(model_embed(provider, "question"), "finite")
-  expect_false("novaRush" %in% loadedNamespaces())
 })

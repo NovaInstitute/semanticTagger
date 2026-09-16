@@ -80,6 +80,33 @@ test_that("embedding resumes after a provider fails between batches", {
   expect_true(is.matrix(completed$state$embeddings))
 })
 
+test_that("embedding request batches can share a persistence checkpoint", {
+  store <- memory_tag_store()
+  checkpoints <- integer()
+  workflow <- new_tagging_workflow(
+    workflow_fixture_questions(), store, run_id = "workflow-checkpoint-size"
+  )
+  workflow <- workflow_embed_questions(
+    workflow, workflow_fixture_provider(), batch_size = 1L,
+    checkpoint_size = 4L,
+    progress_callback = function(completed, total) {
+      checkpoints <<- c(checkpoints, completed)
+    }
+  )
+  expect_equal(checkpoints, 4L)
+  expect_equal(workflow$state$revision, 3L)
+  expect_true(is.matrix(workflow$state$embeddings))
+  incomplete <- new_tagging_workflow(
+    workflow_fixture_questions(), memory_tag_store(),
+    run_id = "workflow-invalid-checkpoint-size"
+  )
+  expect_error(
+    workflow_embed_questions(incomplete, workflow_fixture_provider(),
+                             checkpoint_size = 0L),
+    "checkpoint_size"
+  )
+})
+
 test_that("proposal and review flow remains provider and persistence neutral", {
   store <- memory_tag_store()
   provider <- workflow_fixture_provider()

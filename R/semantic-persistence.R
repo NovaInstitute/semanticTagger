@@ -119,7 +119,7 @@ tag_state_to_semantic_records <- function(
     "hierarchy", state$run_id, hierarchy_version, base_iri = base_iri
   )
   cluster_iri <- function(level, cluster_id) tagging_entity_iri(
-    "hierarchy", state$run_id, state$revision, "cluster", level, cluster_id,
+    "hierarchy", state$run_id, hierarchy_version, "cluster", level, cluster_id,
     base_iri = base_iri
   )
 
@@ -205,7 +205,8 @@ tag_state_to_semantic_records <- function(
         leaf_id <- state$assignments$cluster_level_1[[i]]
         list(
           "@id" = tagging_entity_iri(
-            "hierarchy", state$run_id, state$revision, "membership", question_id,
+            "hierarchy", state$run_id, hierarchy_version,
+            "membership", question_id,
             base_iri = base_iri
           ),
           "@type" = .tag_term("LeafClusterMembership"),
@@ -299,6 +300,21 @@ tag_state_to_semantic_records <- function(
 }
 
 .tag_id_from_ref <- function(value) value[["@id"]] %||% as.character(value)
+
+.tag_restore_frame <- function(value) {
+  if (is.null(value) || is.data.frame(value)) return(value)
+  if (!is.list(value)) return(value)
+  if (length(value) && is.null(names(value)) &&
+      all(vapply(value, is.list, logical(1)))) {
+    return(dplyr::bind_rows(value))
+  }
+  lengths <- lengths(value)
+  if (length(value) && !is.null(names(value)) &&
+      length(unique(lengths)) == 1L) {
+    return(tibble::as_tibble(value))
+  }
+  value
+}
 
 #' Reconstruct tagging state from semantic records
 #'
@@ -438,7 +454,14 @@ tag_state_from_semantic_records <- function(records, questions) {
   }
 
   review_nodes <- .tag_nodes_of_type(all_nodes, "ReviewDecision")
-  state$review_events <- lapply(review_nodes, function(node) list(
+  state$review_events <- lapply(review_nodes, function(node) {
+    similarity <- .tag_json_value(
+      node[["https://data.nova.org/vocabulary/tagging/similarity"]]
+    )
+    if (is.list(similarity) && !is.null(similarity$questions)) {
+      similarity$questions <- .tag_restore_frame(similarity$questions)
+    }
+    list(
     event_id = as.character(node[["https://schema.org/identifier"]]),
     proposal_id = as.character(node[["https://data.nova.org/vocabulary/tagging/proposalId"]]),
     run_id = run_id,
@@ -449,9 +472,10 @@ tag_state_from_semantic_records <- function(records, questions) {
     rationale = as.character(node[["https://data.nova.org/vocabulary/tagging/rationale"]]),
     original_tag = as.character(node[["https://data.nova.org/vocabulary/tagging/originalLabel"]]),
     resulting_tag = as.character(node[["https://data.nova.org/vocabulary/tagging/resultingLabel"]]),
-    similarity = .tag_json_value(node[["https://data.nova.org/vocabulary/tagging/similarity"]]),
+    similarity = similarity,
     created_at = .tag_parse_time(node[["http://purl.org/dc/terms/created"]])
-  ))
+    )
+  })
   state$structure_events <- lapply(
     .tag_nodes_of_type(all_nodes, "QuestionReclassification"),
     function(node) .tag_json_value(

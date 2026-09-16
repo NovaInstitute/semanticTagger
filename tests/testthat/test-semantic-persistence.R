@@ -1,33 +1,3 @@
-semantic_state_fixture <- function() {
-  questions <- tibble::tibble(
-    id = paste0("q", 1:4),
-    caption = c("Age?", "Age group?", "Income?", "Income group?")
-  )
-  embeddings <- rbind(c(1, 0), c(.9, .1), c(0, 1), c(.1, .9))
-  fit <- cluster_embeddings(embeddings, 2L)
-  state <- new_tag_state(questions, "semantic:run/one")
-  state$revision <- 7L
-  state$embeddings <- embeddings
-  state$assignments <- add_cluster_assignments(questions, fit$hclust, 2L)
-  state$clusters <- build_cluster_index(state$assignments, 2L)
-  state$clusters_by_level <- 2L
-  state$workflow <- list(
-    stage = "review", embedding_model = "embed-v1",
-    generation_model = "generate-v1", clustering_method = "hierarchical_ward_d2"
-  )
-  state <- register_tag_proposal(
-    state, 1L, state$clusters$cluster_id[[1]], "age", confidence = .9,
-    rationale = "age questions", provider = "fixture", model = "generate-v1",
-    embedding_model = "embed-v1", tag_embedding = c(1, 0),
-    evidence = list(source = "fixture")
-  )
-  proposal_id <- names(state$proposals)[[1]]
-  state <- review_tag_proposal(
-    state, proposal_id, "accepted", "reviewer-1", "looks coherent"
-  )
-  state
-}
-
 test_that("semantic projection uses absolute and safely encoded entity IRIs", {
   records <- tag_state_to_semantic_records(
     semantic_state_fixture(), base_iri = "https://example.org/tagger",
@@ -60,6 +30,45 @@ test_that("hierarchy projection stores membership only at the leaf level", {
       "https://data.nova.org/vocabulary/tagging/cluster"
     ]][["@id"]], fixed = TRUE)
   }, logical(1))))
+})
+
+test_that("non-structural revisions preserve hierarchy entity identities", {
+  state <- semantic_state_fixture()
+  state$workflow$hierarchy_version <- 3L
+  state$revision <- 8L
+  before <- tag_state_to_semantic_records(
+    state, question_base_iri = "https://example.org/survey/question/"
+  )
+
+  state$revision <- 9L
+  state$proposals[[1]]$status <- "edited"
+  state$clusters$tag[[1]] <- "reviewed age"
+  after <- tag_state_to_semantic_records(
+    state, question_base_iri = "https://example.org/survey/question/"
+  )
+
+  hierarchy_ids <- function(records, type) {
+    sort(vapply(
+      novaTagger:::.tag_nodes_of_type(records$hierarchy, type),
+      `[[`, character(1), "@id"
+    ))
+  }
+  expect_equal(
+    hierarchy_ids(after, "QuestionCluster"),
+    hierarchy_ids(before, "QuestionCluster")
+  )
+  expect_equal(
+    hierarchy_ids(after, "LeafClusterMembership"),
+    hierarchy_ids(before, "LeafClusterMembership")
+  )
+  expect_true(all(grepl(
+    "/hierarchy/semantic%3Arun%2Fone/3/",
+    hierarchy_ids(after, "QuestionCluster"), fixed = TRUE
+  )))
+  expect_false(any(grepl(
+    "/hierarchy/semantic%3Arun%2Fone/9/",
+    hierarchy_ids(after, "QuestionCluster"), fixed = TRUE
+  )))
 })
 
 test_that("parent links reconstruct every level from leaf-only membership", {

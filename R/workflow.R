@@ -80,11 +80,16 @@ resume_tagging_workflow <- function(store) {
 #' @param workflow A `tagging_workflow`.
 #' @param provider A [new_model_provider()] implementation.
 #' @param batch_size Maximum questions per provider request.
+#' @param checkpoint_size Approximate number of newly embedded questions between
+#'   persistence checkpoints. Defaults to `batch_size`, preserving the behavior
+#'   of checkpointing every provider request. A larger value reduces persistence
+#'   traffic at the cost of repeating at most that many embeddings after a crash.
 #' @param event_callback Optional structured event callback.
 #' @param progress_callback Optional function accepting `(completed, total)`.
 #' @return Updated workflow.
 #' @export
 workflow_embed_questions <- function(workflow, provider, batch_size = 100L,
+                                     checkpoint_size = batch_size,
                                      event_callback = NULL,
                                      progress_callback = NULL) {
   workflow <- .validate_tagging_workflow(workflow)
@@ -101,8 +106,15 @@ workflow_embed_questions <- function(workflow, provider, batch_size = 100L,
   pending <- which(vapply(embeddings, is.null, logical(1)))
   if (!length(pending) && identical(state$workflow$stage, "embedded")) return(workflow)
   batch_size <- max(1L, as.integer(batch_size))
+  checkpoint_size <- suppressWarnings(as.integer(checkpoint_size))
+  if (length(checkpoint_size) != 1L || is.na(checkpoint_size) ||
+      checkpoint_size < 1L) {
+    stop("`checkpoint_size` must be one positive integer.", call. = FALSE)
+  }
   batches <- split(pending, ceiling(seq_along(pending) / batch_size))
-  for (indices in batches) {
+  since_checkpoint <- 0L
+  for (batch_number in seq_along(batches)) {
+    indices <- batches[[batch_number]]
     if (!length(indices)) next
     embeddings[indices] <- model_embed_batch(
       provider, state$questions$caption[indices], event_callback
@@ -112,13 +124,19 @@ workflow_embed_questions <- function(workflow, provider, batch_size = 100L,
     state$workflow$model_provider <- provider$name
     state$workflow$embedding_model <- provider$embedding_model
     state$workflow$generation_model <- provider$generation_model
-    workflow$state <- state
-    workflow <- .workflow_checkpoint(workflow)
-    state <- workflow$state
-    completed <- sum(!vapply(embeddings, is.null, logical(1)))
-    if (is.function(progress_callback)) progress_callback(completed, total)
-    .workflow_emit(event_callback, "embedding_checkpoint", state,
-                   list(completed = completed, total = total))
+    since_checkpoint <- since_checkpoint + length(indices)
+    should_checkpoint <- since_checkpoint >= checkpoint_size ||
+      batch_number == length(batches)
+    if (should_checkpoint) {
+      workflow$state <- state
+      workflow <- .workflow_checkpoint(workflow)
+      state <- workflow$state
+      completed <- sum(!vapply(embeddings, is.null, logical(1)))
+      if (is.function(progress_callback)) progress_callback(completed, total)
+      .workflow_emit(event_callback, "embedding_checkpoint", state,
+                     list(completed = completed, total = total))
+      since_checkpoint <- 0L
+    }
   }
   state$embeddings <- do.call(rbind, .validate_embedding_vectors(embeddings, total))
   state$workflow$stage <- "embedded"
@@ -258,6 +276,7 @@ workflow_propose_next <- function(
                         trace_callback = event_callback)
   proposal <- parse_tag_proposal_response(raw)
   tag_embedding <- model_embed(provider, proposal$tag, event_callback)
+  proposal_ids_before <- names(workflow$state$proposals)
   workflow$state <- register_tag_proposal(
     workflow$state, cluster_level, cluster_id, proposal$tag,
     proposal$confidence, proposal$rationale, proposal$needs_review,
@@ -268,10 +287,17 @@ workflow_propose_next <- function(
     ),
     prompt = prompt, raw_response = raw
   )
+  proposal_id <- setdiff(names(workflow$state$proposals), proposal_ids_before)
+  if (length(proposal_id) != 1L) {
+    stop("Exactly one proposal must be registered per checkpoint.", call. = FALSE)
+  }
+  proposal_id <- proposal_id[[1L]]
   workflow$state$workflow$stage <- "review"
   workflow$state$workflow$model_provider <- provider$name
   workflow$state$workflow$generation_model <- provider$generation_model
-  workflow <- .workflow_checkpoint(workflow)
+  workflow$state <- .tag_store_save_focused(
+    workflow$store, workflow$state, "save_proposal", proposal_id
+  )
   .workflow_emit(event_callback, "proposal_checkpoint", workflow$state,
                  list(level = cluster_level, cluster_id = cluster_id))
   workflow
@@ -306,12 +332,18 @@ workflow_review_proposal <- function(workflow, proposal_id, decision,
     validate_model_provider(provider)
     embed_tag <- function(value) model_embed(provider, value, event_callback)
   }
+  event_count <- length(workflow$state$review_events)
   workflow$state <- review_tag_proposal(
     workflow$state, proposal_id, decision, reviewer_id, rationale, tag,
     embed_tag = embed_tag
   )
   workflow$state$workflow$stage <- .workflow_stage_after_review(workflow)
-  workflow <- .workflow_checkpoint(workflow)
+  event <- workflow$state$review_events[[event_count + 1L]]
+  workflow$state <- .tag_store_save_focused(
+    workflow$store, workflow$state, "save_review", proposal_id,
+    event$event_id, event$level, event$cluster_id,
+    decision %in% c("accepted", "edited", "rejected")
+  )
   .workflow_emit(event_callback, "review_checkpoint", workflow$state,
                  list(proposal_id = proposal_id, decision = decision))
   workflow

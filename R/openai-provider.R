@@ -5,6 +5,8 @@
 #' @param api_key OpenAI API key. Defaults to `OPENAI_API_KEY`.
 #' @param base_url OpenAI API base URL.
 #' @param embed_model Embedding model identifier.
+#' @param dimensions Optional output dimensions for embedding models that
+#'   support shortened embeddings. Use `NULL` to request the model default.
 #' @param generation_model Responses API model identifier.
 #' @return An OpenAI provider configuration list.
 #' @export
@@ -12,11 +14,19 @@ openai_config <- function(
     api_key = Sys.getenv("OPENAI_API_KEY", unset = ""),
     base_url = Sys.getenv("OPENAI_BASE_URL", unset = "https://api.openai.com/v1"),
     embed_model = Sys.getenv("OPENAI_EMBED_MODEL", unset = "text-embedding-3-small"),
+    dimensions = NULL,
     generation_model = Sys.getenv("OPENAI_TAGGER_MODEL", unset = "gpt-5.4-mini")) {
+  if (!is.null(dimensions)) {
+    dimensions <- suppressWarnings(as.integer(dimensions))
+    if (length(dimensions) != 1L || is.na(dimensions) || dimensions < 1L) {
+      stop("`dimensions` must be NULL or one positive integer.", call. = FALSE)
+    }
+  }
   list(
     api_key = as.character(api_key),
     base_url = sub("/+$", "", as.character(base_url)),
     embed_model = as.character(embed_model),
+    dimensions = dimensions,
     generation_model = as.character(generation_model)
   )
 }
@@ -119,14 +129,18 @@ openai_model_provider <- function(config = openai_config()) {
       }
       TRUE
     },
-    metadata = list(base_url = config$base_url)
+    metadata = list(
+      base_url = config$base_url,
+      embedding_dimensions = config$dimensions
+    )
   )
 }
 
 .openai_embed_batch <- function(config, texts, trace_callback = NULL) {
+  body <- list(model = config$embed_model, input = unname(as.character(texts)))
+  if (!is.null(config$dimensions)) body$dimensions <- config$dimensions
   response <- .openai_request(
-    config, "/embeddings",
-    list(model = config$embed_model, input = unname(as.character(texts))),
+    config, "/embeddings", body,
     120, trace_callback
   )
   items <- response$data %||% list()
