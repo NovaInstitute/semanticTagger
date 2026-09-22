@@ -274,10 +274,32 @@ novarush_semantic_repository <- function(
     cache$records
   }
 
+  cached_revision <- function(scope_iri) {
+    if (!identical(cache$scope, scope_iri) || is.null(cache$records) ||
+        !length(cache$records$run)) return(NULL)
+    versions <- vapply(cache$records$run, function(node) {
+      version <- node[["https://schema.org/version"]]
+      if (is.list(version) && "@value" %in% names(version)) {
+        version <- version[["@value"]]
+      }
+      value <- suppressWarnings(as.integer(version))
+      if (length(value) == 1L) value else NA_integer_
+    }, integer(1))
+    versions <- versions[!is.na(versions)]
+    if (!length(versions)) return(NULL)
+    max(versions)
+  }
+
   check_revision <- function(scope_iri, revision) {
-    stored <- .nr_query_run_revision(
-      scope_iri, graphs$run, config = config, branch = branch
-    )
+    # Fluree's query index can briefly lag a just-committed transaction. While
+    # this repository remains alive, its cache is the authoritative view of
+    # its own successful writes. A fresh repository still checks Fluree.
+    stored <- cached_revision(scope_iri)
+    if (is.null(stored)) {
+      stored <- .nr_query_run_revision(
+        scope_iri, graphs$run, config = config, branch = branch
+      )
+    }
     if (!is.null(stored)) {
       expected <- as.integer(revision) - 1L
       if (!identical(stored, expected)) {

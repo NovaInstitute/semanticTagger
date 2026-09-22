@@ -1,30 +1,3 @@
-memory_semantic_repository <- function() {
-  storage <- new.env(parent = emptyenv())
-  storage$partitions <- list(run = list(), embedding = list(), hierarchy = list(), review = list())
-  merge_nodes <- function(existing, incoming) {
-    for (node in incoming) {
-      ids <- vapply(existing, function(value) value[["@id"]], character(1))
-      hit <- match(node[["@id"]], ids)
-      if (is.na(hit)) existing[[length(existing) + 1L]] <- node else existing[[hit]] <- node
-    }
-    existing
-  }
-  list(
-    exists = function(scope_iri) length(storage$partitions$run) > 0L,
-    load = function(scope_iri) storage$partitions,
-    save = function(records, scope_iri, revision) {
-      for (partition in names(storage$partitions)) {
-        storage$partitions[[partition]] <- merge_nodes(
-          storage$partitions[[partition]], records[[partition]]
-        )
-      }
-      invisible(TRUE)
-    },
-    metadata = list(backend = "fixture"),
-    storage = storage
-  )
-}
-
 test_that("semantic tag store saves and resumes pre-hierarchy progress", {
   questions <- tibble::tibble(id = c("q1", "q2"), caption = c("Age?", "Income?"))
   repository <- memory_semantic_repository()
@@ -74,4 +47,20 @@ test_that("semantic tag store filters immutable history to current hierarchy", {
     novaTagger:::.current_semantic_records(repository$load("unused"))$hierarchy,
     "HierarchyVersion"
   )), 1L)
+})
+
+test_that("semantic tag store selects the newest duplicate run pointer", {
+  state <- semantic_state_fixture()
+  records <- tag_state_to_semantic_records(
+    state, question_base_iri = "https://example.org/question/"
+  )
+  historical_run <- records$run[[1L]]
+  historical_run[["https://schema.org/version"]] <- state$revision - 1L
+  records$run <- c(list(historical_run), records$run)
+
+  current <- novaTagger:::.current_semantic_records(records)
+  expect_length(current$run, 1L)
+  expect_equal(
+    current$run[[1L]][["https://schema.org/version"]], state$revision
+  )
 })

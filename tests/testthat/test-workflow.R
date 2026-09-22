@@ -142,6 +142,38 @@ test_that("proposal and review flow remains provider and persistence neutral", {
   expect_equal(resume_tagging_workflow(store)$state$workflow$stage, "complete")
 })
 
+test_that("proposal and review use focused store checkpoints", {
+  storage <- new.env(parent = emptyenv())
+  storage$state <- NULL
+  calls <- character()
+  store <- new_tag_store(
+    exists = function() !is.null(storage$state),
+    load = function() storage$state,
+    save = function(state) storage$state <- state,
+    save_proposal = function(state, proposal_id) {
+      calls <<- c(calls, paste0("proposal:", proposal_id))
+      storage$state <- state
+    },
+    save_review = function(state, proposal_id, event_id, ...) {
+      calls <<- c(calls, paste0("review:", proposal_id, ":", event_id))
+      storage$state <- state
+    }
+  )
+  workflow <- new_tagging_workflow(
+    workflow_fixture_questions(), store, run_id = "workflow-focused"
+  )
+  workflow <- workflow_embed_questions(workflow, workflow_fixture_provider())
+  workflow <- workflow_cluster_hierarchical(workflow, 2L)
+  workflow <- workflow_propose_next(workflow, workflow_fixture_provider())
+  proposal_id <- names(workflow$state$proposals)[[1L]]
+  workflow <- workflow_review_proposal(
+    workflow, proposal_id, "accepted", "reviewer-1"
+  )
+  expect_match(calls[[1L]], "^proposal:")
+  expect_match(calls[[2L]], "^review:")
+  expect_equal(storage$state$revision, workflow$state$revision)
+})
+
 test_that("edited workflow decisions recompute and persist similarities", {
   provider <- workflow_fixture_provider()
   workflow <- new_tagging_workflow(

@@ -6,12 +6,16 @@
 - [x] Accept question records rather than reading `forms.Rda`.
 - [x] Move provider-neutral embedding, clustering, evidence, tagging, review,
   diagnostics, and hierarchy-editing code with tests.
-- [x] Keep the staged package free of direct Fluree HTTP calls; composition
-  with `novaRush` remains an integration issue.
+- [x] Keep the package free of direct Fluree HTTP calls and compose semantic
+  persistence through public `novaRush` operations.
 - [x] Retain a persistence-neutral tagging-store contract.
 - [x] Provide OpenAI and optional Ollama adapters through one provider contract.
 - [x] Provide provider- and persistence-neutral resumable workflow orchestration.
 - [x] Define transport-free tagging-domain JSON-LD records and reconstruction.
+- [x] Query novaGraphDB taggable-question knowledge through novaRush with
+  paginated question and closed-answer retrieval.
+- [x] Provide one Fluree-backed application entry point that retrieves
+  questions and starts or resumes an authoritative tagging workflow.
 
 ## Persistence redesign
 
@@ -41,8 +45,10 @@
 - [x] Recompute similarities after accepted tag edits.
 - [x] Define a persistence-neutral repository contract for similar questions,
   positive/negative reviewer precedents, and approved guidance.
-- [ ] Implement the composition adapter that maps these domain requests onto
-  public `novaRush` operations.
+- [ ] Implement the evidence composition adapter that maps similarity,
+  precedent, and guidance requests onto public `novaRush` operations.
+- [x] Implement the semantic-state composition adapter using novaRush named
+  graphs and native vectors.
 - [ ] Validate precedent ranking and filtering against real reviewer history.
 - [ ] Define explicit guidance promotion into Developer Memory.
 

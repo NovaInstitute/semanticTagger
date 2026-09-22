@@ -10,14 +10,30 @@
 
 .current_semantic_records <- function(records) {
   runs <- .tag_nodes_of_type(records$run, "TaggingRun")
-  if (length(runs) != 1L) {
-    stop("The semantic repository did not return exactly one tagging run.",
+  if (!length(runs)) {
+    stop("The semantic repository did not return a tagging run.", call. = FALSE)
+  }
+  run_iris <- unique(vapply(runs, `[[`, character(1), "@id"))
+  if (length(run_iris) != 1L) {
+    stop("The semantic repository returned multiple distinct tagging runs.",
          call. = FALSE)
   }
-  current_ref <- runs[[1]][["https://www.w3.org/ns/prov#hadRevision"]]
+  # Fluree may briefly return historical payload envelopes for repeated upserts
+  # of the one mutable run pointer. They are all the same entity: retain its
+  # greatest revision, rather than treating index lag as a corrupt run.
+  revisions <- vapply(runs, function(node) suppressWarnings(as.integer(
+    node[["https://schema.org/version"]]
+  )), integer(1))
+  valid <- which(!is.na(revisions))
+  if (!length(valid)) {
+    stop("The semantic repository returned a tagging run without a revision.",
+         call. = FALSE)
+  }
+  run <- runs[[valid[[which.max(revisions[valid])]]]]
+  current_ref <- run[["https://www.w3.org/ns/prov#hadRevision"]]
   if (is.null(current_ref)) {
     return(list(
-      run = runs, embedding = records$embedding %||% list(),
+      run = list(run), embedding = records$embedding %||% list(),
       hierarchy = list(), review = records$review %||% list()
     ))
   }
@@ -35,7 +51,7 @@
     FALSE
   }, records$hierarchy %||% list())
   list(
-    run = runs,
+    run = list(run),
     embedding = records$embedding %||% list(),
     hierarchy = unname(hierarchy),
     review = records$review %||% list()

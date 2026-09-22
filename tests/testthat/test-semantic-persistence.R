@@ -144,6 +144,41 @@ test_that("semantic records reconstruct authoritative tagging state", {
   expect_true(is.data.frame(restored$tag_matrix))
 })
 
+test_that("JSON-decoded similarity questions reconstruct as a data frame", {
+  state <- semantic_state_fixture()
+  state$review_events[[1L]]$similarity <- list(
+    questions = tibble::tibble(
+      question_id = c("q1", "q2"),
+      before_similarity = c(0.4, 0.5),
+      after_similarity = c(0.7, 0.8),
+      change = c(0.3, 0.3)
+    ),
+    before = list(mean = 0.45), after = list(mean = 0.75),
+    mean_change = 0.3
+  )
+  records <- tag_state_to_semantic_records(
+    state, question_base_iri = "https://example.org/question/"
+  )
+  review <- novaTagger:::.tag_nodes_of_type(records, "ReviewDecision")[[1L]]
+  property <- "https://data.nova.org/vocabulary/tagging/similarity"
+  decoded <- jsonlite::fromJSON(
+    jsonlite::toJSON(review[[property]][["@value"]], auto_unbox = TRUE),
+    simplifyVector = FALSE
+  )
+  review[[property]][["@value"]] <- decoded
+  records$review <- c(
+    Filter(function(node) {
+      !identical(novaTagger:::.tag_node_type(node),
+                 novaTagger:::.tag_term("ReviewDecision"))
+    }, records$review),
+    list(review)
+  )
+  restored <- tag_state_from_semantic_records(records, state$questions)
+  expect_s3_class(restored$review_events[[1L]]$similarity$questions,
+                  "data.frame")
+  expect_equal(nrow(restored$review_events[[1L]]$similarity$questions), 2L)
+})
+
 test_that("semantic reconstruction rejects ambiguous projections", {
   expect_error(
     tag_state_from_semantic_records(list(), tibble::tibble(id = "q1", caption = "Age?")),

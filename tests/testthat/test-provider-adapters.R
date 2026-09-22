@@ -1,7 +1,8 @@
 test_that("OpenAI adapter conforms to the shared provider contract", {
   config <- openai_config(
     api_key = "test-secret", base_url = "https://example.invalid/v1/",
-    embed_model = "embed-test", generation_model = "generation-test"
+    embed_model = "embed-test", dimensions = 256L,
+    generation_model = "generation-test"
   )
   calls <- list()
   testthat::with_mocked_bindings(
@@ -18,6 +19,7 @@ test_that("OpenAI adapter conforms to the shared provider contract", {
       )
       expect_true(model_provider_validate(provider))
       expect_equal(provider$metadata$base_url, "https://example.invalid/v1")
+      expect_equal(provider$metadata$embedding_dimensions, 256L)
       expect_false("api_key" %in% names(provider$metadata))
     },
     .openai_request = function(config, endpoint, body, timeout_sec,
@@ -36,12 +38,22 @@ test_that("OpenAI adapter conforms to the shared provider contract", {
   expect_equal(vapply(calls, `[[`, character(1), "endpoint"),
                c("/embeddings", "/embeddings", "/responses"))
   expect_equal(calls[[3]]$body$text$format$type, "json_object")
+  expect_true(all(vapply(calls[1:2], function(call) {
+    identical(call$body$dimensions, 256L)
+  }, logical(1))))
 })
 
 test_that("OpenAI configuration requires a runtime secret", {
   provider <- openai_model_provider(openai_config(api_key = ""))
   expect_error(model_provider_validate(provider), "OPENAI_API_KEY")
   expect_error(model_embed(provider, "age"), "OPENAI_API_KEY")
+})
+
+test_that("OpenAI embedding dimensions are optional and validated", {
+  expect_null(openai_config(api_key = "test")$dimensions)
+  expect_equal(openai_config(api_key = "test", dimensions = 512)$dimensions,
+               512L)
+  expect_error(openai_config(api_key = "test", dimensions = 0), "dimensions")
 })
 
 test_that("OpenAI response extraction supports both response layouts", {

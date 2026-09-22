@@ -24,6 +24,9 @@
 #' @param source_form_id Optional source-form IRI to retain.
 #' @param page_size Maximum rows retrieved in each survey query.
 #' @param batch_size Maximum semantic resources in each tagging write.
+#' @param query_page_size Maximum records per tagging-state hydration query.
+#' @param transaction_delay_seconds Seconds to pause after each supporting
+#'   Fluree transaction during large writes.
 #' @param base_iri Base IRI for tagging-domain entities.
 #' @param event_callback Optional callback passed when starting a new workflow.
 #'
@@ -33,7 +36,8 @@
 fluree_tagging_workflow <- function(
     config, survey_graph, tagging_graphs, run_id,
     branch = config$branch, procedure_id = NULL, source_form_id = NULL,
-    page_size = 500L, batch_size = 250L,
+    page_size = 500L, batch_size = 250L, query_page_size = 100L,
+    transaction_delay_seconds = 0,
     base_iri = "https://data.nova.org/tagger/", event_callback = NULL) {
   run_id <- as.character(run_id)
   if (length(run_id) != 1L || is.na(run_id) || !nzchar(run_id)) {
@@ -50,7 +54,8 @@ fluree_tagging_workflow <- function(
   }
   repository <- .fluree_workflow_repository(
     config = config, graphs = tagging_graphs, branch = branch,
-    batch_size = batch_size
+    batch_size = batch_size, query_page_size = query_page_size,
+    transaction_delay_seconds = transaction_delay_seconds
   )
   store <- semantic_tag_store(
     repository = repository, questions = questions, run_id = run_id,
