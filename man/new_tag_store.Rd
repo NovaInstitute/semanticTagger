@@ -24,6 +24,10 @@ new_tag_store(
 \item{label}{Short implementation label used in messages and diagnostics.}
 
 \item{metadata}{Optional implementation metadata for diagnostics.}
+
+\item{save_proposal}{Optional focused callback for saving one proposal.}
+
+\item{save_review}{Optional focused callback for saving one review decision.}
 }
 \value{
 A \code{tag_store} object.

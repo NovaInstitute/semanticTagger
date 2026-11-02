@@ -10,7 +10,9 @@ novarush_reviewed_taxonomy_repository(
   branch = config$branch,
   base_iri = "https://data.nova.org/tagger/",
   batch_size = 250L,
-  query_page_size = 500L
+  query_page_size = 500L,
+  verification_attempts = 5L,
+  verification_delay_seconds = 1.2
 )
 }
 \arguments{
@@ -26,12 +28,19 @@ novarush_reviewed_taxonomy_repository(
 \item{batch_size}{Maximum hierarchy records per write.}
 
 \item{query_page_size}{Maximum records per verification query.}
+
+\item{verification_attempts}{Number of read-back attempts used to verify
+the run header and materialized taxonomy.}
+
+\item{verification_delay_seconds}{Delay between verification attempts.}
 }
 \value{
-Repository callbacks \code{replace()} and \code{load()}.
+Repository callbacks \code{checkpoint()}, \code{record_publication()},
+backward-compatible \code{replace()}, and \code{load()}.
 }
 \description{
 The repository replaces the current run-scoped hierarchy on an isolated
-branch, publishes the small run header last, and appends a compact
-publication record. It does not merge branches.
+branch and publishes the small run header last. Checkpoint materialization
+and publication preparation are separate operations. It does not merge
+branches.
 }
