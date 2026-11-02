@@ -9,6 +9,8 @@
 #' @param save Function accepting a `tag_state`.
 #' @param label Short implementation label used in messages and diagnostics.
 #' @param metadata Optional implementation metadata for diagnostics.
+#' @param save_proposal Optional focused callback for saving one proposal.
+#' @param save_review Optional focused callback for saving one review decision.
 #'
 #' @return A `tag_store` object.
 #' @export

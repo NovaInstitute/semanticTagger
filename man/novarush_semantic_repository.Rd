@@ -10,7 +10,9 @@ novarush_semantic_repository(
   branch = config$branch,
   batch_size = 250L,
   query_page_size = 100L,
-  transaction_delay_seconds = 0
+  transaction_delay_seconds = 0,
+  load_embeddings = TRUE,
+  load_review = TRUE
 )
 }
 \arguments{
@@ -28,6 +30,12 @@ novarush_semantic_repository(
 \item{transaction_delay_seconds}{Seconds to pause after every supporting
 Fluree transaction. This lets background indexing catch up during large
 embedding imports. Defaults to zero.}
+
+\item{load_embeddings}{Whether repository hydration should query and restore
+embedding records. Disable this for taxonomy-only review clients.}
+
+\item{load_review}{Whether repository hydration should query historical
+proposal and review records.}
 }
 \value{
 Repository callbacks accepted by \code{\link[=semantic_tag_store]{semantic_tag_store()}}.

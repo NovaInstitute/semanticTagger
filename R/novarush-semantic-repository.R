@@ -112,6 +112,34 @@
   }, lapply(rows, function(row) .nr_payload_value(row[[1L]]))))
 }
 
+.nr_query_payloads_of_type <- function(scope_iri, graph, types, config, branch,
+                                       page_size = 100L) {
+  types <- unique(as.character(types))
+  unname(unlist(lapply(types, function(type) {
+    rows <- tryCatch(
+      .nr_query_pages(
+        list(
+          select = list("?payload"),
+          where = list(list(
+            "@id" = "?entity", "@type" = type,
+            "https://data.nova.org/vocabulary/tagging/persistenceScope" =
+              list("@id" = scope_iri),
+            "https://data.nova.org/vocabulary/tagging/recordPayload" = "?payload"
+          )),
+          orderBy = list("?entity")
+        ),
+        graph, config, branch, page_size
+      ),
+      error = function(error) {
+        if (.nr_unknown_graph_error(error)) return(list())
+        stop(error)
+      }
+    )
+    Filter(function(node) is.list(node) && !is.null(node[["@id"]]),
+           lapply(rows, function(row) .nr_payload_value(row[[1L]])))
+  }), recursive = FALSE))
+}
+
 .nr_query_vectors <- function(scope_iri, graph, config, branch,
                               page_size = 100L) {
   rows <- .nr_query_pages(
@@ -157,10 +185,14 @@
   as.integer(.nr_payload_value(rows[[1L]][[1L]]))
 }
 
-.nr_load_records <- function(scope_iri, graphs, config, branch, page_size) {
-  records <- lapply(graphs, function(graph) {
-    .nr_query_payloads(scope_iri, graph, config, branch, page_size)
+.nr_load_records <- function(scope_iri, graphs, config, branch, page_size,
+                             load_embeddings = TRUE, load_review = TRUE) {
+  records <- lapply(names(graphs), function(partition) {
+    if (identical(partition, "embedding") && !isTRUE(load_embeddings)) return(list())
+    if (identical(partition, "review") && !isTRUE(load_review)) return(list())
+    .nr_query_payloads(scope_iri, graphs[[partition]], config, branch, page_size)
   })
+  names(records) <- names(graphs)
   if (length(records$embedding)) {
     vectors <- .nr_query_vectors(
       scope_iri, graphs$embedding, config, branch, page_size
@@ -231,13 +263,18 @@
 #' @param transaction_delay_seconds Seconds to pause after every supporting
 #'   Fluree transaction. This lets background indexing catch up during large
 #'   embedding imports. Defaults to zero.
+#' @param load_embeddings Whether repository hydration should query and restore
+#'   embedding records. Disable this for taxonomy-only review clients.
+#' @param load_review Whether repository hydration should query historical
+#'   proposal and review records.
 #'
 #' @return Repository callbacks accepted by [semantic_tag_store()].
 #' @export
 #' @importFrom novaRush queryNamedGraph upsertNamedGraph upsertVectors
 novarush_semantic_repository <- function(
     config, graphs, branch = config$branch, batch_size = 250L,
-    query_page_size = 100L, transaction_delay_seconds = 0) {
+    query_page_size = 100L, transaction_delay_seconds = 0,
+    load_embeddings = TRUE, load_review = TRUE) {
   graphs <- .nr_validate_graphs(graphs)
   if (length(branch) != 1L || is.na(branch) || !nzchar(branch)) {
     stop("`branch` must be one non-empty branch name.", call. = FALSE)
@@ -259,6 +296,11 @@ novarush_semantic_repository <- function(
     stop("`transaction_delay_seconds` must be non-negative numeric.",
          call. = FALSE)
   }
+  if (length(load_embeddings) != 1L || is.na(load_embeddings) ||
+      length(load_review) != 1L || is.na(load_review)) {
+    stop("`load_embeddings` and `load_review` must be single logical values.",
+         call. = FALSE)
+  }
   cache <- new.env(parent = emptyenv())
   cache$scope <- NULL
   cache$records <- NULL
@@ -269,7 +311,8 @@ novarush_semantic_repository <- function(
     cache$scope <- scope_iri
     cache$records <- .nr_load_records(
       scope_iri, graphs, config = config, branch = branch,
-      page_size = query_page_size
+      page_size = query_page_size, load_embeddings = load_embeddings,
+      load_review = load_review
     )
     cache$records
   }
@@ -379,7 +422,9 @@ novarush_semantic_repository <- function(
     metadata = list(
       backend = "novaRush", branch = branch, graphs = graphs,
       batch_size = batch_size, query_page_size = query_page_size,
-      transaction_delay_seconds = transaction_delay_seconds
+      transaction_delay_seconds = transaction_delay_seconds,
+      load_embeddings = isTRUE(load_embeddings),
+      load_review = isTRUE(load_review)
     )
   )
 }

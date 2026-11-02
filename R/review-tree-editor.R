@@ -82,7 +82,7 @@ edit_review_tree <- function(state, command) {
     if (!length(stack)) stop('There is no edit to ',action,'.')
     previous <- stack[[length(stack)]]
     s[[to]] <- c(s[[to]],list(snapshot(s)))
-    s[[from]] <- head(stack,-1L)
+    s[[from]] <- utils::head(stack,-1L)
     return(restore(s,previous))
   }
   if(action=='deduplicate') {
@@ -102,11 +102,38 @@ edit_review_tree <- function(state, command) {
   n <- s$nodes
   root <- n$id[is.na(n$parent)]
   if(length(root)!=1L || anyDuplicated(n$id)) stop('The draft must have one root and unique category IDs.')
+  children <- function(id) n$id[which(!is.na(n$parent) & n$parent==id)]
+  label <- function(id) n$label[match(id,n$id)]
+  path <- function(id) {
+    parent_id <- n$parent[match(id,n$id)]
+    if(is.na(parent_id)) label(id) else paste(path(parent_id),label(id),sep=' -> ')
+  }
+  if(action=='move_question') {
+    question_id <- as.character(command$question_id)
+    if(length(question_id)!=1L || is.na(question_id) || !nzchar(question_id)) stop('Choose a question to move.')
+    row <- match(question_id,as.character(s$questions$id))
+    if(is.na(row)) stop('That question is no longer available in this draft.')
+    destination <- as.integer(command$destination)
+    leaves <- n$id[!n$id %in% n$parent[!is.na(n$parent)]]
+    if(length(destination)!=1L || is.na(destination) || !destination %in% leaves) stop('Choose an existing leaf category.')
+    old <- s$questions$leaf[row]
+    if(identical(as.integer(old),destination)) stop('This question is already in that category.')
+    id <- s$questions$id[row]
+    s$questions$leaf[row] <- destination
+    s$resolved <- union(s$resolved,id)
+    s$unresolved <- setdiff(s$unresolved,id)
+    s$placements <- s$placements[as.character(s$placements$id)!=question_id,,drop=FALSE]
+    placement <- data.frame(id=id,decision='moved')
+    s$placements <- rbind(s$placements,placement)
+    detail <- paste('Moved question',question_id,':',path(old),'->',path(destination))
+    s$history <- rbind(s$history,data.frame(action=action,detail=detail))
+    s$editor_undo <- c(s$editor_undo,list(snapshot(state)))
+    s$editor_redo <- list()
+    return(s)
+  }
   target <- as.integer(command$target)
   if(length(target)!=1L || is.na(target) || !target %in% n$id) stop('Select an existing category.')
-  children <- function(id) n$id[which(n$parent==id)]
   descendants <- function(id) c(id,unlist(lapply(children(id),descendants),use.names=FALSE))
-  label <- function(id) n$label[match(id,n$id)]
   parent <- n$parent[match(target,n$id)]
   valid_name <- function(name, parent, except=integer()) {
     name <- trimws(name)
@@ -131,14 +158,14 @@ edit_review_tree <- function(state, command) {
   if(action=='rename') {
     name <- valid_name(command$label,parent,target)
     s$nodes$label[s$nodes$id==target] <- name
-    detail <- paste(label(target),'→',name)
+    detail <- paste(label(target),'->',name)
   } else if(action=='move') {
     d <- destination()
     if(target==root || d %in% descendants(target)) stop('A category cannot be moved into itself or its descendants.')
     valid_name(label(target),d,target)
     if(any(s$questions$leaf==d)) stop('The destination directly contains questions. Add an empty grouping category or move its questions first.')
     s$nodes$parent[s$nodes$id==target] <- d
-    detail <- paste(label(target),'→',label(d))
+    detail <- paste(label(target),'->',label(d))
   } else if(action=='add') {
     if(any(s$questions$leaf==target)) stop('This category directly contains questions. Add the grouping under its parent first.')
     name <- valid_name(command$label,target)

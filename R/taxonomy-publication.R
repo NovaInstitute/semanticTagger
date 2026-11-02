@@ -192,7 +192,9 @@ reviewed_taxonomy_records <- function(
     row <- taxonomy$nodes[i, , drop = FALSE]
     node <- list(
       "@id" = unname(cluster_iri[[row$id[[1L]]]]),
-      "@type" = .taxonomy_term("QuestionCluster"),
+      # Keep the reviewed projection distinct from the immutable pipeline
+      # QuestionCluster records that remain in the same hierarchy graph.
+      "@type" = .taxonomy_term("ReviewedTaxonomyNode"),
       "https://schema.org/identifier" = row$id[[1L]],
       "http://www.w3.org/2000/01/rdf-schema#label" = row$label[[1L]]
     )
@@ -254,7 +256,7 @@ reviewed_taxonomy_from_records <- function(records) {
   )), integer(1))
   run <- runs[[which.max(versions)]]
   clusters <- Filter(function(node) {
-    identical(node[["@type"]], .taxonomy_term("QuestionCluster"))
+    identical(node[["@type"]], .taxonomy_term("ReviewedTaxonomyNode"))
   }, records$hierarchy)
   tagged <- Filter(function(node) {
     identical(node[["@type"]], .taxonomy_term("TaggedQuestion"))
@@ -392,8 +394,9 @@ taxonomy_publication_record <- function(
 #' Create a novaRush-backed current-taxonomy repository
 #'
 #' The repository replaces the current run-scoped hierarchy on an isolated
-#' branch, publishes the small run header last, and appends a compact
-#' publication record. It does not merge branches.
+#' branch and publishes the small run header last. Checkpoint materialization
+#' and publication preparation are separate operations. It does not merge
+#' branches.
 #'
 #' @param config A Fluree configuration created by [novaRush::setConfig()].
 #' @param graphs Named tagging graph list containing `run`, `embedding`,
@@ -402,55 +405,229 @@ taxonomy_publication_record <- function(
 #' @param base_iri Tagging entity base IRI.
 #' @param batch_size Maximum hierarchy records per write.
 #' @param query_page_size Maximum records per verification query.
-#' @return Repository callbacks `replace()` and `load()`.
+#' @param verification_attempts Number of read-back attempts used to verify
+#'   the run header and materialized taxonomy.
+#' @param verification_delay_seconds Delay between verification attempts.
+#' @return Repository callbacks `checkpoint()`, `record_publication()`,
+#'   backward-compatible `replace()`, and `load()`.
 #' @export
 novarush_reviewed_taxonomy_repository <- function(
     config, graphs, branch = config$branch,
     base_iri = "https://data.nova.org/tagger/", batch_size = 250L,
-    query_page_size = 500L) {
+    query_page_size = 500L, verification_attempts = 5L,
+    verification_delay_seconds = 1.2) {
   graphs <- .nr_validate_graphs(graphs)
   base_iri <- .tag_absolute_base(base_iri)
   batch_size <- suppressWarnings(as.integer(batch_size))
   query_page_size <- suppressWarnings(as.integer(query_page_size))
+  verification_attempts <- suppressWarnings(as.integer(verification_attempts))
+  verification_delay_seconds <- suppressWarnings(as.numeric(verification_delay_seconds))
   if (length(batch_size) != 1L || is.na(batch_size) || batch_size < 1L ||
       length(query_page_size) != 1L || is.na(query_page_size) ||
-      query_page_size < 1L) {
-    stop("Batch and query page sizes must be positive integers.", call. = FALSE)
+      query_page_size < 1L || length(verification_attempts)!=1L ||
+      is.na(verification_attempts) || verification_attempts<1L ||
+      length(verification_delay_seconds)!=1L ||
+      is.na(verification_delay_seconds) || verification_delay_seconds<0) {
+    stop("Batch, query, and verification settings must be positive.", call. = FALSE)
   }
   scope_for <- function(run_id) tagging_entity_iri(
     "run", run_id, base_iri = base_iri
   )
+  report <- function(progress, value, message, detail = NULL) {
+    if (is.function(progress)) progress(value, message, detail)
+    invisible(NULL)
+  }
   load <- function(run_id) {
     scope <- scope_for(run_id)
     list(
       run = .nr_query_payloads(
         scope, graphs$run, config, branch, query_page_size
       ),
-      hierarchy = .nr_query_payloads(
-        scope, graphs$hierarchy, config, branch, query_page_size
+      hierarchy = .nr_query_payloads_of_type(
+        scope, graphs$hierarchy,
+        c(.taxonomy_term("ReviewedTaxonomyNode"),
+          .taxonomy_term("TaggedQuestion")),
+        config, branch, query_page_size
       ),
-      review = .nr_query_payloads(
-        scope, graphs$review, config, branch, query_page_size
+      review = .nr_query_payloads_of_type(
+        scope, graphs$review, .taxonomy_term("TaxonomyPublication"),
+        config, branch, query_page_size
       )
     )
   }
-  delete_records <- function(records, graph, scope) {
+  delete_records <- function(records, graph, scope, on_batch = NULL) {
     for (batch in .taxonomy_repository_batches(records, batch_size)) {
       .nr_update_named_graph(
         delete = lapply(batch, .nr_envelope, scope_iri = scope),
         graph = graph, config = config, branch = branch
       )
+      if (is.function(on_batch)) on_batch(length(batch))
     }
   }
-  insert_records <- function(records, graph, scope) {
+  insert_records <- function(records, graph, scope, on_batch = NULL) {
     for (batch in .taxonomy_repository_batches(records, batch_size)) {
       .nr_upsert_named_graph(
         lapply(batch, .nr_envelope, scope_iri = scope), graph,
         config = config, branch = branch
       )
+      if (is.function(on_batch)) on_batch(length(batch))
     }
   }
-  replace <- function(taxonomy, publication) {
+  canonical_hierarchy <- function(records) Filter(function(node) {
+    type <- node[["@type"]]
+    identical(type,.taxonomy_term("ReviewedTaxonomyNode")) ||
+      identical(type,.taxonomy_term("TaggedQuestion"))
+  },records)
+  ids <- function(records) if(!length(records)) character() else
+    vapply(records,function(node) as.character(node[["@id"]]),character(1))
+  replace_hierarchy_delta <- function(current, desired, scope, progress = NULL) {
+    old_ids <- ids(current);new_ids <- ids(desired)
+    hit <- match(new_ids,old_ids)
+    changed <- is.na(hit)
+    matched <- which(!changed)
+    changed[matched] <- !vapply(matched,function(i) identical(current[[hit[[i]]]],desired[[i]]),logical(1))
+    changed_existing <- which(changed & !is.na(hit))
+    removed <- which(!old_ids %in% new_ids)
+    added <- which(changed & is.na(hit))
+    total <- length(changed_existing) + length(removed) + length(added)
+    completed <- 0L
+    advance <- function(count) {
+      completed <<- completed + count
+      value <- if (!total) 0.58 else 0.15 + 0.43 * completed / total
+      report(progress, value, "Writing the taxonomy checkpoint",
+             paste(format(completed, big.mark = ","), "of",
+                   format(total, big.mark = ","),
+                   "changed records processed..."))
+    }
+    for(batch in .taxonomy_repository_batches(changed_existing,batch_size)) {
+      .nr_update_named_graph(
+        delete=lapply(current[hit[batch]],.nr_envelope,scope_iri=scope),
+        insert=lapply(desired[batch],.nr_envelope,scope_iri=scope),
+        graph=graphs$hierarchy,config=config,branch=branch
+      )
+      advance(length(batch))
+    }
+    if(length(removed)) delete_records(
+      current[removed], graphs$hierarchy, scope, advance
+    )
+    if(length(added)) insert_records(
+      desired[added], graphs$hierarchy, scope, advance
+    )
+    if (!total) report(progress, 0.58, "Taxonomy already current",
+                       "No hierarchy or assignment records needed changing.")
+    invisible(list(changed=length(changed_existing),removed=length(removed),added=length(added)))
+  }
+  prepare_run <- function(current_run, desired_run, publication = NULL) {
+    if (length(current_run)) {
+      versions <- vapply(current_run, function(node) suppressWarnings(as.integer(
+        node[["https://schema.org/version"]]
+      )), integer(1))
+      preserved <- current_run[[which.max(versions)]]
+      preserved[["https://www.w3.org/ns/prov#hadRevision"]] <- NULL
+      preserved[[.taxonomy_term("latestPublication")]] <- NULL
+      desired_run <- utils::modifyList(preserved, desired_run)
+    }
+    desired_run[["http://purl.org/dc/terms/modified"]] <- .tag_time(Sys.time())
+    if (!is.null(publication)) {
+      desired_run[[.taxonomy_term("latestPublication")]] <-
+        list("@id" = publication[["@id"]])
+    }
+    desired_run
+  }
+  write_run <- function(current_run, desired_run, scope) {
+    if (length(current_run)) {
+      .nr_update_named_graph(
+        delete = lapply(current_run, .nr_envelope, scope_iri = scope),
+        insert = lapply(list(desired_run), .nr_envelope, scope_iri = scope),
+        graph = graphs$run, config = config, branch = branch
+      )
+    } else insert_records(list(desired_run), graphs$run, scope)
+  }
+  verify_run <- function(desired_run, taxonomy, scope) {
+    run_visible <- FALSE
+    for (attempt in seq_len(verification_attempts)) {
+      if (attempt > 1L) insert_records(list(desired_run), graphs$run, scope)
+      if (verification_delay_seconds > 0) Sys.sleep(verification_delay_seconds)
+      visible <- .nr_query_payloads(
+        scope, graphs$run, config, branch, query_page_size
+      )
+      run_visible <- any(vapply(visible, function(node) {
+        identical(node[[.taxonomy_term("taxonomyChecksum")]],
+                  taxonomy$taxonomy_checksum) &&
+          identical(node[[.taxonomy_term("assignmentChecksum")]],
+                    taxonomy$assignment_checksum)
+      }, logical(1)))
+      if (run_visible) break
+    }
+    run_visible
+  }
+  verify_taxonomy <- function(taxonomy) {
+    verified <- NULL
+    for (attempt in seq_len(verification_attempts)) {
+      records <- load(taxonomy$run_id)
+      verified <- tryCatch(
+        reviewed_taxonomy_from_records(records), error = function(error) NULL
+      )
+      if (!is.null(verified) &&
+          identical(verified$taxonomy_checksum, taxonomy$taxonomy_checksum) &&
+          identical(verified$assignment_checksum,
+                    taxonomy$assignment_checksum)) break
+      verified <- NULL
+      if (attempt < verification_attempts && verification_delay_seconds > 0) {
+        Sys.sleep(verification_delay_seconds)
+      }
+    }
+    verified
+  }
+  checkpoint <- function(taxonomy, progress = NULL) {
+    validate_reviewed_taxonomy(taxonomy)
+    report(progress, 0.03, "Validating checkpoint",
+           "The complete taxonomy and question assignments are valid.")
+    records <- reviewed_taxonomy_records(taxonomy, base_iri = base_iri)
+    scope <- scope_for(taxonomy$run_id)
+    report(progress, 0.10, "Reading the current branch snapshot",
+           "Comparing the saved taxonomy with the new checkpoint...")
+    current <- load(taxonomy$run_id)
+    records$run[[1L]] <- prepare_run(current$run, records$run[[1L]])
+
+    # Pipeline hierarchy records are immutable inputs. Keep them in place and
+    # update only the distinct reviewed projection. Besides producing far less
+    # Fluree novelty, this leaves journal replay recoverable if preparation is
+    # interrupted before the run header is switched.
+    delta <- replace_hierarchy_delta(
+      canonical_hierarchy(current$hierarchy), records$hierarchy, scope,
+      progress
+    )
+    report(progress, 0.62, "Taxonomy records written",
+           paste(delta$added, "added;", delta$changed, "changed;",
+                 delta$removed, "removed. Updating the current revision..."))
+    write_run(current$run, records$run[[1L]], scope)
+    # Fluree 4.1 can acknowledge the first write immediately following a long
+    # bulk hierarchy phase before that run-header change is query-visible (and
+    # in practice has occasionally committed it as a no-op). Re-upsert the
+    # small idempotent header and verify it independently before recording the
+    # publication or clearing the journal.
+    report(progress, 0.72, "Verifying the checkpoint header",
+           "Waiting for Fluree to expose the new current revision...")
+    if (!verify_run(records$run[[1L]], taxonomy, scope)) {
+      stop("The checkpoint hierarchy was written, but its run header could not be verified. The journal was retained; reconnect before retrying.",
+           call. = FALSE)
+    }
+    report(progress, 0.84, "Reading the checkpoint back",
+           "Reconstructing the taxonomy from Fluree and comparing checksums...")
+    verified_taxonomy <- verify_taxonomy(taxonomy)
+    if (is.null(verified_taxonomy)) {
+      stop("The checkpoint taxonomy could not be verified on the review branch.",
+           call. = FALSE)
+    }
+    report(progress, 1, "Checkpoint verified",
+           "The materialized taxonomy is safe; the journal can now be cleared.")
+    invisible(list(
+      taxonomy = taxonomy, hierarchy_records = length(records$hierarchy),
+      delta = delta, verified = TRUE
+    ))
+  }
+  record_publication <- function(taxonomy, publication, progress = NULL) {
     validate_reviewed_taxonomy(taxonomy)
     if (!is.list(publication) ||
         !identical(publication[["@type"]],
@@ -458,47 +635,56 @@ novarush_reviewed_taxonomy_repository <- function(
       stop("`publication` must be a taxonomy publication record.",
            call. = FALSE)
     }
-    records <- reviewed_taxonomy_records(taxonomy, base_iri = base_iri)
     scope <- scope_for(taxonomy$run_id)
+    report(progress, 0.10, "Checking the branch checkpoint",
+           "Confirming that the prepared taxonomy matches the saved checkpoint...")
     current <- load(taxonomy$run_id)
-    if (length(current$run)) {
-      versions <- vapply(current$run, function(node) suppressWarnings(as.integer(
-        node[["https://schema.org/version"]]
-      )), integer(1))
-      preserved <- current$run[[which.max(versions)]]
-      preserved[["https://www.w3.org/ns/prov#hadRevision"]] <- NULL
-      records$run[[1L]] <- utils::modifyList(preserved, records$run[[1L]])
-    }
-    records$run[[1L]][["http://purl.org/dc/terms/modified"]] <- .tag_time(Sys.time())
-    records$run[[1L]][[.taxonomy_term("latestPublication")]] <-
-      list("@id" = publication[["@id"]])
-
-    # The review branch is intentionally isolated while these bounded writes
-    # replace its current projection. The small run header is switched last.
-    delete_records(current$hierarchy, graphs$hierarchy, scope)
-    insert_records(records$hierarchy, graphs$hierarchy, scope)
-    delete_records(current$run, graphs$run, scope)
-    insert_records(records$run, graphs$run, scope)
-    insert_records(list(publication), graphs$review, scope)
-
-    verified <- load(taxonomy$run_id)
-    expected_run <- records$run[[1L]]
-    matching_run <- Filter(function(node) {
-      identical(node[[.taxonomy_term("taxonomyChecksum")]],
-                taxonomy$taxonomy_checksum) &&
-        identical(node[[.taxonomy_term("assignmentChecksum")]],
-                  taxonomy$assignment_checksum)
-    }, verified$run)
-    if (length(matching_run) != 1L ||
-        length(verified$hierarchy) != length(records$hierarchy)) {
-      stop("The prepared taxonomy could not be verified on the review branch.",
+    stored <- tryCatch(
+      reviewed_taxonomy_from_records(current), error = function(error) NULL
+    )
+    if (is.null(stored) ||
+        !identical(stored$taxonomy_checksum, taxonomy$taxonomy_checksum) ||
+        !identical(stored$assignment_checksum, taxonomy$assignment_checksum)) {
+      stop("Create and verify a branch checkpoint before preparing publication.",
            call. = FALSE)
     }
-    invisible(list(
-      taxonomy = taxonomy, publication = publication,
-      hierarchy_records = length(records$hierarchy), verified = TRUE
-    ))
+    desired_run <- prepare_run(current$run, current$run[[which.max(vapply(
+      current$run, function(node) suppressWarnings(as.integer(
+        node[["https://schema.org/version"]]
+      )), integer(1)))]], publication)
+    report(progress, 0.40, "Recording publication metadata",
+           "Writing the reviewer, source branch and verified checksums...")
+    insert_records(list(publication), graphs$review, scope)
+    write_run(current$run, desired_run, scope)
+    if (!verify_run(desired_run, taxonomy, scope)) {
+      stop("The publication header could not be verified. Reconnect before retrying.",
+           call. = FALSE)
+    }
+    report(progress, 0.75, "Verifying publication",
+           "Reading the publication marker back from Fluree...")
+    verified <- load(taxonomy$run_id)
+    ids <- vapply(verified$review, function(node) {
+      as.character(node[["https://schema.org/identifier"]] %||% "")
+    }, character(1))
+    publication_id <- as.character(
+      publication[["https://schema.org/identifier"]]
+    )
+    if (!publication_id %in% ids) {
+      stop("The publication record could not be verified on the review branch.",
+           call. = FALSE)
+    }
+    report(progress, 1, "Publication prepared",
+           "The branch is now locked and ready to merge into main.")
+    invisible(list(taxonomy = taxonomy, publication = publication,
+                   verified = TRUE))
   }
-  list(replace = replace, load = load,
+  replace <- function(taxonomy, publication, progress = NULL) {
+    result <- checkpoint(taxonomy, progress)
+    prepared <- record_publication(taxonomy, publication, progress)
+    result$publication <- prepared$publication
+    invisible(result)
+  }
+  list(checkpoint = checkpoint, record_publication = record_publication,
+       replace = replace, load = load,
        metadata = list(branch = branch, graphs = graphs, base_iri = base_iri))
 }
