@@ -65,6 +65,25 @@
   )
 }
 
+# Reviewer workspaces only need the stable question identity, visible text and
+# provenance fields copied into the editable state. Keeping this projection
+# separate avoids hydrating response semantics and every closed-answer option
+# merely to browse or move questions in the taxonomy editor.
+.review_question_query <- function(limit, offset, source_form_id) {
+  list(
+    select = list("?question", "?text", "?procedure", "?order"),
+    where = list(list(
+      "@id" = "?question",
+      "https://w3id.org/survey-ontology#hasText" = "?text",
+      "https://data.nova.org/vocabulary/survey/questionClass" = "?class",
+      "https://w3id.org/survey-ontology#inSurveyProcedure" = "?procedure",
+      "http://www.w3.org/ns/prov#wasDerivedFrom" = list("@id" = source_form_id),
+      "https://data.nova.org/vocabulary/survey/elementOrder" = "?order"
+    )),
+    orderBy = list("?question"), limit = limit, offset = offset
+  )
+}
+
 .answer_option_query <- function(limit, offset, source_form_id = NULL) {
   question_pattern <- list(
     "@id" = "?question",
@@ -104,7 +123,8 @@
   )
 }
 
-.query_pages <- function(query_builder, config, graph, branch, page_size, ...) {
+.query_pages <- function(query_builder, config, graph, branch, page_size,
+                         on_page = NULL, ...) {
   offset <- 0L
   rows <- list()
   repeat {
@@ -113,10 +133,112 @@
     )
     page <- .nr_result_rows(page)
     rows <- c(rows, page)
+    if (is.function(on_page)) on_page(length(page), offset, page_size)
     if (length(page) < page_size) break
     offset <- offset + page_size
   }
   rows
+}
+
+.review_question_rows <- function(rows, source_form_id) {
+  if (!length(rows)) return(tibble::tibble(
+    id = character(), iri = character(), caption = character(),
+    procedure_id = character(), source_form_id = character(),
+    element_order = integer()
+  ))
+  value <- function(row, index, default = NA_character_) {
+    .query_result_value(if (length(row) >= index) row[[index]] else NULL, default)
+  }
+  id <- vapply(rows, value, character(1), index = 1L)
+  tibble::tibble(
+    id = id,
+    iri = id,
+    caption = vapply(rows, value, character(1), index = 2L),
+    procedure_id = vapply(rows, value, character(1), index = 3L),
+    source_form_id = rep(as.character(source_form_id), length(rows)),
+    element_order = suppressWarnings(as.integer(vapply(rows, function(row) {
+      as.character(value(row, 4L))
+    }, character(1))))
+  )
+}
+
+.validate_review_questions <- function(questions) {
+  required <- c("id", "iri", "caption", "procedure_id", "source_form_id",
+                "element_order")
+  if (!all(required %in% names(questions)) || !nrow(questions)) {
+    stop("The survey graph contains no reviewable questions.", call. = FALSE)
+  }
+  text_fields <- required[required != "element_order"]
+  invalid_text <- vapply(questions[text_fields], function(values) {
+    any(is.na(values) | !nzchar(trimws(as.character(values))))
+  }, logical(1))
+  if (any(invalid_text) || anyNA(questions$element_order) ||
+      any(questions$element_order < 1L) || anyDuplicated(questions$id)) {
+    stop("Review questions require unique identifiers, text, provenance, and positive element order.",
+         call. = FALSE)
+  }
+  invisible(questions)
+}
+
+#' Query the lightweight question projection used by taxonomy reviewers
+#'
+#' Retrieves only the question identity, visible text, source form, procedure,
+#' and element order required to reconstruct a review workspace. It deliberately
+#' skips response metadata and closed-answer options.
+#'
+#' @param config A Fluree configuration created by [novaRush::setConfig()].
+#' @param graph Absolute IRI of the survey knowledge named graph.
+#' @param branch Fluree branch. Defaults to `config$branch`.
+#' @param page_size Maximum rows requested per Fluree query.
+#' @param on_page Optional callback receiving `loaded`, `page_rows`,
+#'   `source_index`, `source_total`, and `source_form_id` after each page.
+#'
+#' @return A tibble containing the exact question fields consumed by reviewer
+#'   state reconstruction.
+#' @export
+#' @importFrom novaRush queryNamedGraph
+query_review_questions <- function(
+    config, graph, branch = config$branch, page_size = 500L,
+    on_page = NULL) {
+  .nr_validate_graphs(list(
+    run = graph, embedding = graph, hierarchy = graph, review = graph
+  ))
+  page_size <- suppressWarnings(as.integer(page_size))
+  if (length(page_size) != 1L || is.na(page_size) || page_size < 1L) {
+    stop("`page_size` must be one positive integer.", call. = FALSE)
+  }
+  if (!is.null(on_page) && !is.function(on_page)) {
+    stop("`on_page` must be a function or NULL.", call. = FALSE)
+  }
+  source_forms <- .source_form_rows(.query_pages(
+    .source_form_query, config, graph, branch, page_size
+  ))
+  source_forms <- source_forms[!is.na(source_forms) & nzchar(source_forms)]
+  loaded <- 0L
+  partitions <- lapply(seq_along(source_forms), function(index) {
+    source_id <- source_forms[[index]]
+    rows <- .query_pages(
+      .review_question_query, config, graph, branch, page_size,
+      source_form_id = source_id,
+      on_page = function(page_rows, offset, requested) {
+        loaded <<- loaded + page_rows
+        if (is.function(on_page)) on_page(
+          loaded = loaded, page_rows = page_rows,
+          source_index = index, source_total = length(source_forms),
+          source_form_id = source_id
+        )
+      }
+    )
+    .review_question_rows(rows, source_id)
+  })
+  questions <- if (length(partitions)) do.call(rbind, partitions) else
+    .review_question_rows(list(), "")
+  questions <- tibble::as_tibble(questions)
+  questions <- questions[order(
+    questions$procedure_id, questions$element_order, questions$id
+  ), , drop = FALSE]
+  .validate_review_questions(questions)
+  questions
 }
 
 .source_form_rows <- function(rows) {
