@@ -185,3 +185,48 @@ test_that("question source validates graph and page size", {
     "positive integer"
   )
 })
+
+test_that("review question query skips response metadata and reports pages", {
+  forms <- c("https://example.org/form/one", "https://example.org/form/two")
+  question_rows <- list(
+    "https://example.org/form/one" = list(
+      list("https://example.org/question/open", "Describe your household",
+           "https://example.org/procedure/one", "1"),
+      list("https://example.org/question/closed", "Do you consent?",
+           "https://example.org/procedure/one", "2")
+    ),
+    "https://example.org/form/two" = list(
+      list("https://example.org/question/other", "Other question",
+           "https://example.org/procedure/two", "1")
+    )
+  )
+  calls <- list();progress <- list()
+  testthat::local_mocked_bindings(
+    .nr_query_named_graph = function(query, ...) {
+      calls[[length(calls) + 1L]] <<- query
+      rows <- if (length(query$select) == 1L) {
+        lapply(forms, list)
+      } else {
+        question_rows[[query_source_constraint(query)]]
+      }
+      start <- query$offset + 1L
+      if (start > length(rows)) return(list())
+      rows[start:min(length(rows), query$offset + query$limit)]
+    },
+    .package = "novaTagger"
+  )
+  result <- query_review_questions(
+    list(branch = "main"), "https://example.org/graph/survey", page_size = 1L,
+    on_page = function(...) progress[[length(progress) + 1L]] <<- list(...)
+  )
+  expect_equal(nrow(result), 3L)
+  expect_named(result, c(
+    "id", "iri", "caption", "procedure_id", "source_form_id", "element_order"
+  ))
+  expect_equal(result$caption[result$id == "https://example.org/question/closed"],
+               "Do you consent?")
+  expect_true(length(progress) >= 3L)
+  expect_equal(progress[[length(progress)]]$loaded, 3L)
+  expect_true(all(vapply(calls, function(query) length(query$select) <= 4L,
+                         logical(1))))
+})
